@@ -75,6 +75,10 @@ $dataSource = @'
 '@.Trim()
 
 $index = Read-Source 'index.html'
+# As tags Open Graph apontam para o GitHub Pages; no Apps Script não servem.
+$og = [regex]::Match($index, '(?s)\n *<!-- Prévia de link .*?<!-- /Prévia de link -->')
+if (-not $og.Success) { throw 'Bloco "Prévia de link" não encontrado em index.html' }
+$index = $index.Remove($og.Index, $og.Length)
 $index = Set-Exact $index '<link rel="stylesheet" href="css/styles.css">' "<?!= include('Styles'); ?>"
 $index = Set-Exact $index '<script src="js/core.js"></script>' "<?!= include('Core'); ?>"
 $index = Set-Exact $index '<script src="js/app.js"></script>' $dataSource
