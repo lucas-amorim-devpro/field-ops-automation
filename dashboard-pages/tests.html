@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Testes do núcleo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, "Segoe UI", sans-serif; margin: 24px auto; max-width: 860px; padding: 0 16px; background: Canvas; color: CanvasText; }
+    .ok { color: #0a7d0a; } .fail { color: #c62828; font-weight: 600; }
+    li { font-family: Consolas, monospace; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Testes do núcleo (core.js)</h1>
+  <p>Mesmos casos de <code>tests/Indicators.Tests.ps1</code>, para garantir que PowerShell e painel calculam igual.</p>
+  <p id="summary">Rodando…</p>
+  <ul id="out"></ul>
+
+  <script src="js/core.js"></script>
+  <script>
+    (function () {
+      var C = SlotCore, results = [];
+      function eq(name, actual, expected) {
+        var pass = actual === expected;
+        results.push({ name: name, pass: pass, detail: pass ? '' : ' → obtido ' + JSON.stringify(actual) + ', esperado ' + JSON.stringify(expected) });
+      }
+
+      // Arredondamento igual ao Sheets
+      [[0.125, 0.13], [2.675, 2.68], [80.145, 80.15], [1.005, 1.01], [-0.125, -0.13], [80, 80], [66.666666, 66.67]]
+        .forEach(function (c) { eq('roundHalfUp(' + c[0] + ')', C.roundHalfUp(c[0], 2), c[1]); });
+
+      // Formatação
+      eq('formatPct(86.333)', C.formatPct(C.roundHalfUp(86.333, 2)), '86,33%');
+      eq('formatPp(5.66)', C.formatPp(5.66), '+5,66 p.p.');
+      eq('formatPp(-1)', C.formatPp(-1), '−1,00 p.p.');
+
+      // Selo (meta 80, margem 5)
+      var rules = { meta: 80, margemPerto: 5, janelaMinutos: 120, toleranciaMinutos: { 'Instalação': 0, 'Reparo': 30 } };
+      [[92, 'Na meta'], [80, 'Na meta'], [79.99, 'Perto'], [75, 'Perto'], [74.99, 'Abaixo'], [null, 'Sem dados']]
+        .forEach(function (c) { eq('badge(' + c[0] + ')', C.badge(c[0], rules), c[1]); });
+
+      // Mesmo cenário do Pester (Get-PunctualitySummary)
+      function order(tipo, slot, chegada, status, regional) {
+        var json = {
+          versao: 'x', agora: '2026-10-12T13:10', regras: rules,
+          dic: { datas: ['2026-10-12'], regional: [regional], gerente: [['G', 0]], coordenacao: [['C', 0]], supervisao: [['S', 0]],
+                 tecnico: [['T', 0]], cidade: ['X'], tipo: [tipo], slot: [slot], status: [status] },
+          colunas: ['id', 'data', 'cidade', 'tecnico', 'tipo', 'slot', 'chegadaMin', 'status'],
+          linhas: [[1, 0, 0, 0, 0, 0, chegada, 0]]
+        };
+        return C.decode(json).orders[0];
+      }
+      var now = C.parseLocal('2026-10-12T13:10').getTime();
+      var hm = function (t) { return +t.slice(0, 2) * 60 + +t.slice(3); };
+
+      eq('limite Instalação 08:30', new Date(order('Instalação', '08:30', null, 'Agendada', 'A').deadline).toTimeString().slice(0, 5), '10:30');
+      eq('limite Reparo 14:00', new Date(order('Reparo', '14:00', null, 'Agendada', 'A').deadline).toTimeString().slice(0, 5), '16:30');
+      eq('chegada adiantada', C.classify(order('Instalação', '08:30', hm('08:10'), 'Concluída', 'A'), now), 'NoPrazo');
+      eq('chegada no limite', C.classify(order('Instalação', '08:30', hm('10:30'), 'Concluída', 'A'), now), 'NoPrazo');
+      eq('chegada após limite', C.classify(order('Instalação', '08:30', hm('10:31'), 'Concluída', 'A'), now), 'ForaDoPrazo');
+      eq('sem chegada, vencida', C.classify(order('Instalação', '10:30', null, 'Em deslocamento', 'A'), now), 'ForaDoPrazo');
+      eq('sem chegada, no prazo', C.classify(order('Instalação', '14:00', null, 'Em deslocamento', 'A'), now), 'Pendente');
+      eq('cancelada', C.classify(order('Instalação', '08:30', hm('12:00'), 'Cancelada', 'A'), now), 'Excluida');
+
+      var list = [
+        order('Instalação', '08:30', hm('08:40'), 'Concluída', 'A'),
+        order('Instalação', '08:30', hm('09:50'), 'Concluída', 'A'),
+        order('Instalação', '08:30', hm('11:15'), 'Concluída', 'A'),
+        order('Instalação', '08:30', hm('09:00'), 'Concluída', 'B'),
+        order('Instalação', '16:00', null, 'Agendada', 'B'),
+        order('Instalação', '08:30', hm('09:00'), 'Cancelada', 'B')
+      ];
+      var s = C.summarize(list, now, rules);
+      eq('total apuradas', s.apuradas, 4);
+      eq('total %', s.percentual, 75);
+      eq('total selo', s.selo, 'Perto');
+      eq('regional A = 66,67%', C.summarize(list.slice(0, 3), now, rules).percentual, 66.67);
+      eq('variação 82,5 vs 79,25', C.variation(82.5, 79.25), 3.25);
+      eq('variação 70 vs 75,555', C.variation(70, 75.555), -5.56);
+
+      // Contagem regressiva
+      eq('countdown 0', C.formatCountdown(0), 'venceu');
+      eq('countdown 9:05', C.formatCountdown((9 * 60 + 5) * 1000), '9:05');
+      eq('countdown 42 min', C.formatCountdown(42 * 60000), '42 min');
+      eq('countdown 1h05', C.formatCountdown(65 * 60000), '1h05');
+
+      var failed = results.filter(function (r) { return !r.pass; }).length;
+      var out = document.getElementById('out');
+      results.forEach(function (r) {
+        var li = document.createElement('li');
+        li.className = r.pass ? 'ok' : 'fail';
+        li.textContent = (r.pass ? '✔ ' : '✘ ') + r.name + r.detail;
+        out.appendChild(li);
+      });
+      var summary = document.getElementById('summary');
+      summary.className = failed ? 'fail' : 'ok';
+      summary.textContent = (results.length - failed) + ' de ' + results.length + ' passaram' + (failed ? ' — ' + failed + ' falharam' : '');
+      window.TEST_RESULT = { total: results.length, failed: failed };
+    })();
+  </script>
+</body>
+</html>

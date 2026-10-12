@@ -1,0 +1,200 @@
+/*
+ * Núcleo de cálculo do painel "Chegada ao Slot".
+ *
+ * Sem dependências e sem acesso ao DOM: o mesmo arquivo roda no GitHub Pages e dentro do
+ * HtmlService do Apps Script. As regras espelham excel-pipeline/lib/Indicators.ps1, e os
+ * testes em tests.html usam os mesmos casos do Pester, para que PowerShell, painel e
+ * planilha mostrem exatamente o mesmo número.
+ */
+var SlotCore = (function () {
+  'use strict';
+
+  var MINUTE = 60000;
+
+  /**
+   * Arredonda "meio para cima" (para longe do zero), como ARRED/ROUND do Google Sheets.
+   * toPrecision(15) remove o ruído do ponto flutuante antes de arredondar:
+   * 1.005 * 100 = 100.49999999999999 em double, mas 100.5 com 15 dígitos significativos.
+   */
+  function roundHalfUp(value, digits) {
+    if (value === null || value === undefined || !isFinite(value)) return null;
+    var d = digits === undefined ? 2 : digits;
+    var factor = Math.pow(10, d);
+    var sign = value < 0 ? -1 : 1;
+    var scaled = Number((Math.abs(value) * factor).toPrecision(15));
+    return (sign * Math.round(scaled)) / factor;
+  }
+
+  function formatNumber(value, digits) {
+    return value.toLocaleString('pt-BR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
+  /** 86.333 -> "86,33%"; null -> "—" */
+  function formatPct(value) {
+    return value === null ? '—' : formatNumber(value, 2) + '%';
+  }
+
+  /** 5.66 -> "+5,66 p.p."; -1 -> "−1,00 p.p." */
+  function formatPp(value) {
+    if (value === null) return '—';
+    var sign = value > 0 ? '+' : value < 0 ? '−' : '±';
+    return sign + formatNumber(Math.abs(value), 2) + ' p.p.';
+  }
+
+  /** "2026-10-12T13:10" ou "2026-10-12" -> Date no fuso local (sem conversão UTC). */
+  function parseLocal(text) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(text);
+    if (!m) throw new Error('Data inválida: ' + text);
+    return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  }
+
+  function minutesToText(minutes) {
+    var h = Math.floor(minutes / 60), m = minutes % 60;
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+
+  /**
+   * Expande o JSON compactado (dicionário + linhas) em objetos prontos para uso.
+   * Cada linha traz só índices; nomes e hierarquia vêm do dicionário.
+   */
+  function decode(json) {
+    var dic = json.dic;
+    var col = {};
+    json.colunas.forEach(function (name, i) { col[name] = i; });
+
+    var dayStarts = dic.datas.map(function (d) { return parseLocal(d).getTime(); });
+    var tolerance = json.regras.toleranciaMinutos;
+
+    var orders = json.linhas.map(function (r) {
+      var tec = dic.tecnico[r[col.tecnico]];
+      var sup = dic.supervisao[tec[1]];
+      var coo = dic.coordenacao[sup[1]];
+      var ger = dic.gerente[coo[1]];
+      var tipo = dic.tipo[r[col.tipo]];
+      var slot = dic.slot[r[col.slot]];
+      var slotMin = +slot.slice(0, 2) * 60 + +slot.slice(3, 5);
+      var dayStart = dayStarts[r[col.data]];
+      return {
+        id: 'OS-' + r[col.id],
+        day: r[col.data],
+        dayStart: dayStart,
+        regional: dic.regional[ger[1]],
+        gerente: ger[0],
+        coordenacao: coo[0],
+        supervisao: sup[0],
+        tecnico: tec[0],
+        cidade: dic.cidade[r[col.cidade]],
+        tipo: tipo,
+        slot: slot,
+        chegadaMin: r[col.chegadaMin],
+        status: dic.status[r[col.status]],
+        deadline: dayStart + (slotMin + json.regras.janelaMinutos + (tolerance[tipo] || 0)) * MINUTE
+      };
+    });
+
+    return {
+      versao: json.versao,
+      now: parseLocal(json.agora),
+      rules: json.regras,
+      days: dic.datas.slice(),
+      regionals: dic.regional.slice().sort(),
+      slots: dic.slot.slice().sort(),
+      orders: orders
+    };
+  }
+
+  /** NoPrazo | ForaDoPrazo | Pendente | Excluida (mesma regra de Get-PunctualityStatus). */
+  function classify(order, nowMs) {
+    if (order.status === 'Cancelada') return 'Excluida';
+    if (order.chegadaMin !== null) {
+      return order.dayStart + order.chegadaMin * MINUTE <= order.deadline ? 'NoPrazo' : 'ForaDoPrazo';
+    }
+    return nowMs > order.deadline ? 'ForaDoPrazo' : 'Pendente';
+  }
+
+  function badge(pct, rules) {
+    if (pct === null) return 'Sem dados';
+    if (pct >= rules.meta) return 'Na meta';
+    if (pct >= rules.meta - rules.margemPerto) return 'Perto';
+    return 'Abaixo';
+  }
+
+  /** Contagens e % no prazo (2 casas, meio para cima) de uma lista de ordens. */
+  function summarize(orders, nowMs, rules) {
+    var s = { total: orders.length, noPrazo: 0, fora: 0, pendentes: 0, excluidas: 0 };
+    orders.forEach(function (o) {
+      switch (classify(o, nowMs)) {
+        case 'NoPrazo': s.noPrazo++; break;
+        case 'ForaDoPrazo': s.fora++; break;
+        case 'Pendente': s.pendentes++; break;
+        default: s.excluidas++;
+      }
+    });
+    s.apuradas = s.noPrazo + s.fora;
+    s.percentual = s.apuradas ? roundHalfUp((s.noPrazo / s.apuradas) * 100, 2) : null;
+    s.selo = badge(s.percentual, rules);
+    return s;
+  }
+
+  function variation(current, previous) {
+    if (current === null || previous === null || current === undefined || previous === undefined) return null;
+    return roundHalfUp(current - previous, 2);
+  }
+
+  /** Agrupa preservando a ordem de chegada das chaves. */
+  function groupBy(items, keyFn) {
+    var map = new Map();
+    items.forEach(function (item) {
+      var key = keyFn(item);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(item);
+    });
+    return map;
+  }
+
+  /**
+   * Ordens ainda sem chegada cujo limite vence nos próximos `horizonMin` minutos,
+   * agrupadas por supervisor e ordenadas pelo vencimento mais próximo.
+   */
+  function upcomingDeadlines(orders, nowMs, horizonMin) {
+    var limit = nowMs + horizonMin * MINUTE;
+    var pending = orders.filter(function (o) {
+      return classify(o, nowMs) === 'Pendente' && o.deadline > nowMs && o.deadline <= limit;
+    }).sort(function (a, b) { return a.deadline - b.deadline; });
+
+    var groups = [];
+    groupBy(pending, function (o) { return o.supervisao; }).forEach(function (list, name) {
+      groups.push({ supervisao: name, coordenacao: list[0].coordenacao, regional: list[0].regional, orders: list });
+    });
+    return groups;
+  }
+
+  /** "1h05" / "42 min" / "9:05" (minutos:segundos na reta final) até o limite. */
+  function formatCountdown(ms) {
+    if (ms <= 0) return 'venceu';
+    var totalSec = Math.floor(ms / 1000);
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    if (h > 0) return h + 'h' + (m < 10 ? '0' : '') + m;
+    if (m >= 10) return m + ' min';
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  return {
+    MINUTE: MINUTE,
+    roundHalfUp: roundHalfUp,
+    formatPct: formatPct,
+    formatPp: formatPp,
+    parseLocal: parseLocal,
+    minutesToText: minutesToText,
+    decode: decode,
+    classify: classify,
+    badge: badge,
+    summarize: summarize,
+    variation: variation,
+    groupBy: groupBy,
+    upcomingDeadlines: upcomingDeadlines,
+    formatCountdown: formatCountdown
+  };
+})();

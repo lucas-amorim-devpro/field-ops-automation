@@ -1,0 +1,588 @@
+/*
+ * Interface do painel "Chegada ao Slot".
+ *
+ * Fonte de dados plugável:
+ *   - GitHub Pages: lê data/slot-data.json e consulta data/versao.json (padrão abaixo);
+ *   - Apps Script: define window.SLOT_DATA_SOURCE antes deste arquivo (ver apps-script/slot-dashboard).
+ *
+ * Ciclos de atualização:
+ *   - a cada 1 s: relógio e contagens regressivas (só texto, sem redesenhar);
+ *   - a cada 30 s: recalcula tudo (ordens pendentes podem ter estourado o limite);
+ *   - a cada 90 s: consulta leve de versão; só baixa a base se ela mudou;
+ *   - ao voltar para a aba (visibilitychange): recalcula e consulta na hora, porque o
+ *     navegador desacelera ou pausa setInterval em abas em segundo plano.
+ */
+(function () {
+  'use strict';
+
+  const C = SlotCore;
+  const TICK_MS = 1000;
+  const RECOMPUTE_MS = 30000;
+  const VERSION_MS = 90000;
+  const HORIZON_MIN = 120;
+  const LIM_PREVIEW = 3;   // ordens visíveis por supervisor antes do "ver mais"
+  const THEME_KEY = 'slot-tema';
+
+  const state = {
+    data: null,
+    payloadBytes: 0,
+    tipo: '',
+    regional: '',
+    expanded: new Set(),
+    limExpanded: new Set(),
+    speed: 1,
+    simBase: 0,
+    realBase: 0,
+    lastCheck: null,
+    checking: false
+  };
+
+  const source = window.SLOT_DATA_SOURCE || {
+    demo: true,
+    load: () => fetch('data/slot-data.json', { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then((text) => ({ json: JSON.parse(text), bytes: new Blob([text]).size })),
+    version: () => fetch('data/versao.json', { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then((j) => j.versao)
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  // ------------------------------------------------------------------ utilidades
+
+  function esc(text) {
+    return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  /** "Agora" do painel: relógio simulado na demo, relógio real em produção. */
+  function nowMs() {
+    if (!source.demo) return Date.now();
+    return state.simBase + (Date.now() - state.realBase) * state.speed;
+  }
+
+  function timeText(ms, withSeconds) {
+    return new Date(ms).toLocaleTimeString('pt-BR', withSeconds ? {} : { hour: '2-digit', minute: '2-digit' });
+  }
+
+  const BADGE = {
+    'Na meta': { cls: 'ok', icon: '<path d="M4 8.5l2.5 2.5L12 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' },
+    'Perto': { cls: 'near', icon: '<path d="M8 2.5l6 11H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.6v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' },
+    'Abaixo': { cls: 'low', icon: '<path d="M8 3v9M4 8.5L8 12.5l4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' },
+    'Sem dados': { cls: 'none', icon: '<path d="M4 8h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' }
+  };
+  const BADGE_CLASS = { ok: 'badge--ok', near: 'badge--near', low: 'badge--low', none: 'badge--none' };
+
+  function iconSvg(selo) {
+    return '<svg viewBox="0 0 16 16" aria-hidden="true">' + BADGE[selo].icon + '</svg>';
+  }
+
+  function badgeHtml(selo) {
+    const b = BADGE[selo];
+    return '<span class="badge ' + BADGE_CLASS[b.cls] + '">' + iconSvg(selo) + esc(selo) + '</span>';
+  }
+
+  function deltaHtml(pp, label) {
+    if (pp === null) return '<span class="delta delta--flat">— <small>' + esc(label) + '</small></span>';
+    const dir = pp > 0 ? 'up' : pp < 0 ? 'down' : 'flat';
+    const arrow = pp > 0 ? '▲' : pp < 0 ? '▼' : '';
+    return '<span class="delta delta--' + dir + '">' + arrow + ' ' + C.formatPp(pp) + ' <small>' + esc(label) + '</small></span>';
+  }
+
+  function meterHtml(pct, selo, goal) {
+    const cls = 'fill-' + BADGE[selo].cls;
+    const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
+    return '<div class="meter" aria-hidden="true"><div class="meter-fill ' + cls + '" style="width:' + width + '%"></div>' +
+      '<div class="meter-goal" style="left:' + goal + '%"></div></div>';
+  }
+
+  // ------------------------------------------------------------------ filtros
+
+  function todayIndex() { return state.data.days.length - 1; }
+
+  function ordersOf(dayIdx, opts) {
+    const o = opts || {};
+    return state.data.orders.filter((x) =>
+      x.day === dayIdx &&
+      (!state.tipo || x.tipo === state.tipo) &&
+      (o.ignoreRegional || !state.regional || x.regional === state.regional));
+  }
+
+  function filterLabel() {
+    const parts = [state.tipo || 'Todos os tipos'];
+    if (state.regional) parts.push('Regional ' + state.regional);
+    return parts.join(' · ');
+  }
+
+  // ------------------------------------------------------------------ seções
+
+  function renderGeral(now) {
+    const rules = state.data.rules;
+    const today = C.summarize(ordersOf(todayIndex()), now, rules);
+    const prev = C.summarize(ordersOf(todayIndex() - 1), now, rules);
+    const pp = C.variation(today.percentual, prev.percentual);
+
+    const dayName = new Date(state.data.orders.length ? C.parseLocal(state.data.days[todayIndex()]) : now)
+      .toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' });
+    $('geralSub').textContent = 'Hoje, ' + dayName + ' · ' + filterLabel();
+
+    const r = 70, stroke = 16, circ = 2 * Math.PI * r;
+    const pct = today.percentual === null ? 0 : today.percentual;
+    const fillCls = 'fill-' + BADGE[today.selo].cls;
+    const goalAngle = (rules.meta / 100) * 2 * Math.PI;
+    const gx1 = 90 + (r - stroke / 2 - 3) * Math.cos(goalAngle), gy1 = 90 + (r - stroke / 2 - 3) * Math.sin(goalAngle);
+    const gx2 = 90 + (r + stroke / 2 + 3) * Math.cos(goalAngle), gy2 = 90 + (r + stroke / 2 + 3) * Math.sin(goalAngle);
+    const fillColor = { 'fill-ok': 'var(--good)', 'fill-near': 'var(--warn)', 'fill-low': 'var(--crit)', 'fill-none': 'transparent' }[fillCls];
+
+    $('geral').innerHTML =
+      '<div class="donut" role="img" aria-label="' + esc(C.formatPct(today.percentual) + ' no prazo; meta ' + rules.meta + '%') + '">' +
+        '<svg viewBox="0 0 180 180">' +
+          '<circle class="donut-track" cx="90" cy="90" r="' + r + '" fill="none" stroke-width="' + stroke + '"/>' +
+          '<circle class="donut-fill" cx="90" cy="90" r="' + r + '" fill="none" stroke="' + fillColor + '" stroke-width="' + stroke + '" ' +
+            'stroke-dasharray="' + (circ * pct / 100).toFixed(2) + ' ' + circ.toFixed(2) + '"/>' +
+          '<line class="donut-goal" x1="' + gx1.toFixed(2) + '" y1="' + gy1.toFixed(2) + '" x2="' + gx2.toFixed(2) + '" y2="' + gy2.toFixed(2) + '"/>' +
+        '</svg>' +
+        '<div class="donut-center"><div class="hero">' + esc(C.formatPct(today.percentual)) + '</div><div class="hero-label">no prazo</div></div>' +
+      '</div>' +
+      '<div class="geral-info">' +
+        '<div class="geral-line">' + badgeHtml(today.selo) + deltaHtml(pp, 'vs ontem (' + C.formatPct(prev.percentual) + ')') + '</div>' +
+        '<div class="goal-note">Meta ' + rules.meta + '% · "Perto" até ' + rules.margemPerto + ' p.p. abaixo</div>' +
+        '<dl class="counts">' +
+          '<div><dt>No prazo</dt><dd>' + today.noPrazo + '</dd></div>' +
+          '<div><dt>Fora do prazo</dt><dd>' + today.fora + '</dd></div>' +
+          '<div><dt>Apuradas</dt><dd>' + today.apuradas + '</dd></div>' +
+          '<div><dt>Pendentes</dt><dd>' + today.pendentes + '</dd></div>' +
+        '</dl>' +
+      '</div>';
+
+    renderTrend(now, rules);
+  }
+
+  /**
+   * Linha dos últimos dias. A escala vertical é recortada (não começa em 0) porque a
+   * variação diária é de poucos pontos; por isso é linha com pontos, nunca barras.
+   * Desenhada na largura real do card (sem esticar o SVG, que distorceria o texto).
+   */
+  function renderTrend(now, rules) {
+    const host = $('trend');
+    const days = state.data.days;
+    const series = days.map((d, i) => ({ day: d, isToday: i === days.length - 1, s: C.summarize(ordersOf(i), now, rules) }));
+    const values = series.map((p) => p.s.percentual).filter((v) => v !== null);
+
+    const W = Math.max(240, host.clientWidth || 320), H = 116;
+    const left = 34, right = 12, top = 18, bottom = 22;
+    const lo = Math.max(0, Math.floor((Math.min.apply(null, values.concat(rules.meta)) - 5) / 5) * 5);
+    const hi = 100;
+    const x = (i) => left + (series.length === 1 ? 0 : (i * (W - left - right)) / (series.length - 1));
+    const y = (p) => top + (H - top - bottom) * (1 - (p - lo) / (hi - lo));
+
+    let svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="% no prazo nos últimos ' + days.length + ' dias">';
+    [lo, hi].forEach((v) => {
+      svg += '<line class="trend-base" x1="' + left + '" x2="' + (W - right) + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+        '<text class="trend-label" x="' + (left - 6) + '" y="' + (y(v) + 3) + '" text-anchor="end">' + v + '%</text>';
+    });
+    const gy = y(rules.meta).toFixed(1);
+    svg += '<line class="trend-goal" x1="' + left + '" x2="' + (W - right) + '" y1="' + gy + '" y2="' + gy + '"/>' +
+      '<text class="trend-label" x="' + (left - 6) + '" y="' + (Number(gy) + 3) + '" text-anchor="end">meta</text>';
+
+    const pts = series.map((p, i) => p.s.percentual === null ? null : [x(i), y(p.s.percentual)]).filter(Boolean);
+    if (pts.length > 1) {
+      svg += '<polyline class="trend-line" fill="none" points="' + pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ') + '"/>';
+    }
+
+    const band = (W - left - right) / Math.max(1, series.length - 1);
+    series.forEach((p, i) => {
+      const label = p.isToday ? 'hoje' : C.parseLocal(p.day).toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
+      svg += '<text class="trend-label' + (p.isToday ? ' is-today' : '') + '" x="' + x(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(label) + '</text>';
+      if (p.s.percentual !== null) {
+        svg += '<circle class="trend-dot' + (p.isToday ? ' is-today' : '') + '" cx="' + x(i).toFixed(1) + '" cy="' + y(p.s.percentual).toFixed(1) + '" r="' + (p.isToday ? 5 : 4) + '"/>';
+        if (p.isToday) {
+          svg += '<text class="trend-value" x="' + (x(i) - 8).toFixed(1) + '" y="' + (y(p.s.percentual) - 9).toFixed(1) + '" text-anchor="end">' + esc(C.formatPct(p.s.percentual)) + '</text>';
+        }
+      }
+      const tip = C.parseLocal(p.day).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit' }) +
+        (p.isToday ? ' (parcial)' : '') + '\n' + C.formatPct(p.s.percentual) + ' no prazo · ' + p.s.apuradas + ' apuradas';
+      svg += '<rect class="trend-hit" x="' + (x(i) - band / 2).toFixed(1) + '" y="0" width="' + band.toFixed(1) + '" height="' + H + '" data-tip="' + esc(tip) + '"/>';
+    });
+    host.innerHTML = svg + '</svg>';
+  }
+
+  function renderSlots(now) {
+    const rules = state.data.rules;
+    const orders = ordersOf(todayIndex());
+    const bySlot = C.groupBy(orders, (o) => o.slot);
+    let html = '';
+    state.data.slots.forEach((slot) => {
+      const s = C.summarize(bySlot.get(slot) || [], now, rules);
+      const tip = 'Slot ' + slot + '\n' + C.formatPct(s.percentual) + ' no prazo\n' + s.noPrazo + ' no prazo · ' + s.fora + ' fora · ' + s.pendentes + ' pendentes';
+      let track;
+      if (s.percentual === null) {
+        track = '<div class="slot-wait"><span>aguardando · ' + s.pendentes + ' pendentes</span></div>';
+      } else {
+        track = '<div class="slot-bar" style="width:' + s.percentual + '%"></div>' +
+          '<span class="slot-value" style="left:' + s.percentual + '%">' + esc(C.formatPct(s.percentual)) + '</span>';
+      }
+      html += '<div class="slot-row" data-tip="' + esc(tip) + '" tabindex="0">' +
+        '<div class="slot-name">' + esc(slot) + '</div>' +
+        '<div class="slot-track"><div class="slot-base"></div>' + track + '<div class="slot-goal" style="left:' + rules.meta + '%"></div></div>' +
+        '<div class="slot-meta">' + s.apuradas + ' apuradas' + (s.pendentes ? ' · ' + s.pendentes + ' pendentes' : '') + '</div>' +
+      '</div>';
+    });
+    html += '<div class="slots-legend"><span><i class="key-bar"></i>% no prazo</span><span><i class="key-goal"></i>meta ' + rules.meta + '%</span></div>';
+    $('slots').innerHTML = html;
+  }
+
+  function renderRegionais(now) {
+    const rules = state.data.rules;
+    let html = '';
+    state.data.regionals.forEach((reg) => {
+      const filt = (dayIdx) => ordersOf(dayIdx, { ignoreRegional: true }).filter((o) => o.regional === reg);
+      const today = filt(todayIndex());
+      const s = C.summarize(today, now, rules);
+      const prev = C.summarize(filt(todayIndex() - 1), now, rules);
+      const gerente = today.length ? today[0].gerente : '';
+      const pressed = state.regional === reg;
+      const dimmed = state.regional && !pressed;
+      html += '<button type="button" class="reg' + (dimmed ? ' is-dimmed' : '') + '" data-regional="' + esc(reg) + '" aria-pressed="' + pressed + '">' +
+        '<div class="reg-top"><div><div class="reg-name">Regional ' + esc(reg) + '</div><div class="reg-ger">' + esc(gerente) + '</div></div>' + badgeHtml(s.selo) + '</div>' +
+        '<div class="reg-mid"><span class="reg-pct">' + esc(C.formatPct(s.percentual)) + '</span>' + deltaHtml(C.variation(s.percentual, prev.percentual), 'vs ontem') + '</div>' +
+        meterHtml(s.percentual, s.selo, rules.meta) +
+        '<div class="reg-counts">' + s.noPrazo + ' no prazo · ' + s.fora + ' fora · ' + s.pendentes + ' pendentes</div>' +
+      '</button>';
+    });
+    $('regionais').innerHTML = html;
+  }
+
+  function urgencyClass(ms) {
+    if (ms <= 30 * C.MINUTE) return 'is-crit';
+    if (ms <= 60 * C.MINUTE) return 'is-warn';
+    return '';
+  }
+
+  function renderLimites(now) {
+    const orders = ordersOf(todayIndex());
+    const groups = C.upcomingDeadlines(orders, now, HORIZON_MIN);
+    const total = groups.reduce((acc, g) => acc + g.orders.length, 0);
+    const blown = orders.filter((o) => o.chegadaMin === null && C.classify(o, now) === 'ForaDoPrazo').length;
+    const urgent = groups.reduce((acc, g) => acc + g.orders.filter((o) => o.deadline - now <= 30 * C.MINUTE).length, 0);
+
+    let html = '<div class="lim-summary">' +
+      '<span class="pill"><strong>' + total + '</strong> vencem em até 2 h</span>' +
+      '<span class="pill"><strong>' + urgent + '</strong> em até 30 min</span>' +
+      '<span class="pill"><strong>' + blown + '</strong> já estouraram sem chegada hoje</span>' +
+    '</div>';
+
+    if (!groups.length) {
+      html += '<p class="empty">Nenhuma ordem sem chegada vencendo nas próximas 2 h.</p>';
+    } else {
+      html += '<div class="lim-grid">';
+      groups.forEach((g) => {
+        html += '<section class="lim-group" aria-label="' + esc('Supervisão ' + g.supervisao) + '">' +
+          '<header class="lim-group-head"><div><h3>' + esc(g.supervisao) + '</h3><p>Coord. ' + esc(g.coordenacao) + ' · Regional ' + esc(g.regional) + '</p></div>' +
+          '<span class="lim-count">' + g.orders.length + (g.orders.length === 1 ? ' ordem' : ' ordens') + '</span></header><ul class="lim-list">';
+        const open = state.limExpanded.has(g.supervisao);
+        const visible = open ? g.orders : g.orders.slice(0, LIM_PREVIEW);
+        visible.forEach((o) => {
+          const left = o.deadline - now;
+          html += '<li class="lim-item">' +
+            '<span class="cd ' + urgencyClass(left) + '" data-deadline="' + o.deadline + '">' + esc(C.formatCountdown(left)) + '</span>' +
+            '<div class="lim-main"><strong>' + esc(o.id) + '</strong> · ' + esc(o.tecnico) +
+            '<p>limite ' + esc(timeText(o.deadline)) + ' · slot ' + esc(o.slot) + ' · ' + esc(o.tipo) + ' · ' + esc(o.cidade) + '</p></div></li>';
+        });
+        html += '</ul>';
+        if (g.orders.length > LIM_PREVIEW) {
+          html += '<button type="button" class="lim-more" data-sup="' + esc(g.supervisao) + '" aria-expanded="' + open + '">' +
+            (open ? 'Mostrar menos' : 'Ver mais ' + (g.orders.length - LIM_PREVIEW)) + '</button>';
+        }
+        html += '</section>';
+      });
+      html += '</div>';
+    }
+    $('limites').innerHTML = html;
+  }
+
+  // Hierarquia: árvore gerente > coordenação > supervisão > técnico, piores primeiro.
+  const LEVELS = ['gerente', 'coordenacao', 'supervisao', 'tecnico'];
+  const LEVEL_LABEL = ['Gerente', 'Coordenação', 'Supervisão', 'Técnico'];
+
+  function buildTree(orders, level, prefix, now, rules) {
+    const nodes = [];
+    C.groupBy(orders, (o) => o[LEVELS[level]]).forEach((list, name) => {
+      const key = prefix + '|' + name;
+      nodes.push({
+        key: key, name: name, level: level, regional: list[0].regional,
+        s: C.summarize(list, now, rules),
+        children: level < LEVELS.length - 1 ? () => buildTree(list, level + 1, key, now, rules) : null
+      });
+    });
+    return nodes.sort((a, b) => {
+      const pa = a.s.percentual === null ? Infinity : a.s.percentual;
+      const pb = b.s.percentual === null ? Infinity : b.s.percentual;
+      return pa - pb || a.name.localeCompare(b.name, 'pt-BR');
+    });
+  }
+
+  function renderHierarquia(now) {
+    const rules = state.data.rules;
+    const chevron = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const rows = [];
+    const walk = (nodes) => nodes.forEach((n) => {
+      const open = state.expanded.has(n.key);
+      const toggle = n.children
+        ? '<button type="button" class="hier-toggle" data-key="' + esc(n.key) + '" aria-expanded="' + open + '" aria-label="' + (open ? 'Recolher ' : 'Expandir ') + esc(n.name) + '">' + chevron + '</button>'
+        : '<span class="hier-spacer"></span>';
+      const role = n.level === 0 ? 'Regional ' + n.regional : '';
+      const sel = BADGE[n.s.selo];
+      rows.push('<tr class="lvl-' + n.level + '">' +
+        '<td><div class="hier-name" style="padding-left:' + (n.level * 18) + 'px">' + toggle +
+          '<span>' + esc(n.name) + (role ? '<span class="hier-role">' + esc(role) + '</span>' : '') + '</span></div></td>' +
+        '<td class="num">' + n.s.apuradas + '</td>' +
+        '<td class="num hide-sm">' + n.s.noPrazo + '</td>' +
+        '<td class="num hide-sm">' + n.s.fora + '</td>' +
+        '<td class="num hide-sm">' + n.s.pendentes + '</td>' +
+        '<td class="num"><span class="pct-cell">' + meterHtml(n.s.percentual, n.s.selo, rules.meta) +
+          '<span>' + esc(C.formatPct(n.s.percentual)) + '</span>' +
+          '<span class="pct-icon ' + sel.cls + '" title="' + esc(n.s.selo) + '">' + iconSvg(n.s.selo) + '<span class="sr-only">' + esc(n.s.selo) + '</span></span></span></td>' +
+      '</tr>');
+      if (open && n.children) walk(n.children());
+    });
+    walk(buildTree(ordersOf(todayIndex()), 0, '', now, rules));
+    $('hier').tBodies[0].innerHTML = rows.join('') ||
+      '<tr><td colspan="6" class="empty">Sem ordens para o filtro atual.</td></tr>';
+  }
+
+  function renderFilterChip() {
+    $('filterChip').innerHTML = state.regional
+      ? '<button type="button" class="filter-chip" id="clearRegional">Regional ' + esc(state.regional) + ' <span aria-hidden="true">×</span><span class="sr-only"> (remover filtro)</span></button>'
+      : '';
+  }
+
+  function renderFooter() {
+    const d = state.data;
+    const kb = state.payloadBytes ? (state.payloadBytes / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' KB compactado · ' : '';
+    $('foot').innerHTML =
+      '<span>' + (source.demo ? 'Dados 100% fictícios, gerados por script.' : 'Fonte: planilha (somente leitura).') + '</span>' +
+      '<span>Base: ' + kb + d.orders.length.toLocaleString('pt-BR') + ' ordens · versão ' + esc(d.versao.replace('T', ' ')) + '</span>' +
+      '<span><a href="https://github.com/lucas-amorim-devpro/field-ops-automation">Código no GitHub</a></span>';
+  }
+
+  function renderAll() {
+    if (!state.data) return;
+    const now = nowMs();
+    state.rendering = true;
+    try {
+      renderFilterChip();
+      renderGeral(now);
+      renderSlots(now);
+      renderRegionais(now);
+      renderLimites(now);
+      renderHierarquia(now);
+      renderFooter();
+      tick();
+    } finally {
+      state.rendering = false;
+    }
+  }
+
+  // ------------------------------------------------------------------ ciclos
+
+  /** A cada segundo: relógio e contagens regressivas, sem redesenhar o painel. */
+  function tick() {
+    const now = nowMs();
+    if (source.demo) $('clock').textContent = timeText(now, true);
+    let expired = false;
+    document.querySelectorAll('.cd[data-deadline]').forEach((el) => {
+      const left = Number(el.getAttribute('data-deadline')) - now;
+      if (left <= 0) expired = true;
+      el.textContent = C.formatCountdown(left);
+      el.className = 'cd ' + urgencyClass(left);
+    });
+    // Ordem venceu: redesenha para ela sair da lista e entrar como "fora do prazo".
+    if (expired && !state.rendering) renderAll();
+  }
+
+  function setLive(text, mode) {
+    $('liveText').textContent = text;
+    $('live').classList.toggle('is-checking', mode === 'checking');
+    $('live').classList.toggle('is-error', mode === 'error');
+  }
+
+  function liveIdleText() {
+    return 'Atualizado às ' + timeText(state.lastCheck || Date.now(), true);
+  }
+
+  function applyData(result) {
+    const keepClock = state.data && state.data.now.getTime() === C.parseLocal(result.json.agora).getTime();
+    state.data = C.decode(result.json);
+    state.payloadBytes = result.bytes || 0;
+    if (!keepClock) {
+      state.simBase = state.data.now.getTime();
+      state.realBase = Date.now();
+    }
+    state.lastCheck = Date.now();
+    renderAll();
+  }
+
+  function loadData() {
+    setLive('Carregando…', 'checking');
+    return source.load().then((result) => {
+      $('msg').hidden = true;
+      applyData(result);
+      setLive(liveIdleText());
+    }).catch((err) => {
+      setLive('Falha ao carregar', 'error');
+      const msg = $('msg');
+      msg.hidden = false;
+      msg.textContent = 'Não foi possível carregar os dados (' + err.message + '). ' +
+        'Se abriu o arquivo direto do disco, rode tools\\Start-DashboardServer.ps1 e acesse http://localhost:8080.';
+    });
+  }
+
+  /** Consulta leve: só baixa a base inteira quando a versão mudou. */
+  function checkVersion() {
+    if (state.checking || !state.data) return Promise.resolve();
+    state.checking = true;
+    setLive('Verificando…', 'checking');
+    return source.version().then((v) => {
+      if (v !== state.data.versao) return loadData();
+      state.lastCheck = Date.now();
+      setLive(liveIdleText());
+    }).catch(() => {
+      setLive('Sem conexão · tentando de novo', 'error');
+    }).then(() => { state.checking = false; });
+  }
+
+  // ------------------------------------------------------------------ eventos
+
+  function setRadio(group, button) {
+    group.querySelectorAll('[role="radio"]').forEach((b) => b.setAttribute('aria-checked', String(b === button)));
+  }
+
+  function bindEvents() {
+    $('tipoSeg').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-tipo]');
+      if (!b) return;
+      state.tipo = b.getAttribute('data-tipo');
+      setRadio($('tipoSeg'), b);
+      renderAll();
+    });
+
+    $('speedSeg').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-speed]');
+      if (!b) return;
+      state.simBase = nowMs();          // muda a velocidade sem saltar o relógio
+      state.realBase = Date.now();
+      state.speed = Number(b.getAttribute('data-speed'));
+      setRadio($('speedSeg'), b);
+      renderAll();
+    });
+
+    $('regionais').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-regional]');
+      if (!b) return;
+      const reg = b.getAttribute('data-regional');
+      state.regional = state.regional === reg ? '' : reg;
+      renderAll();
+    });
+
+    $('filterChip').addEventListener('click', (e) => {
+      if (!e.target.closest('#clearRegional')) return;
+      state.regional = '';
+      renderAll();
+    });
+
+    $('hier').addEventListener('click', (e) => {
+      const b = e.target.closest('.hier-toggle');
+      if (!b) return;
+      const key = b.getAttribute('data-key');
+      if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
+      renderHierarquia(nowMs());
+      const again = document.querySelector('.hier-toggle[data-key="' + CSS.escape(key) + '"]');
+      if (again) again.focus();
+    });
+
+    $('limites').addEventListener('click', (e) => {
+      const b = e.target.closest('.lim-more');
+      if (!b) return;
+      const sup = b.getAttribute('data-sup');
+      if (state.limExpanded.has(sup)) state.limExpanded.delete(sup); else state.limExpanded.add(sup);
+      renderLimites(nowMs());
+      tick();
+    });
+
+    $('live').addEventListener('click', () => checkVersion());
+
+    // Aba em segundo plano desacelera/pausa os timers: ao voltar, atualiza na hora.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || !state.data) return;
+      renderAll();
+      checkVersion();
+    });
+
+    // A linha de tendência é desenhada na largura real do card: redesenha ao redimensionar.
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { if (state.data) renderTrend(nowMs(), state.data.rules); }, 150);
+    });
+
+    bindTooltip();
+    bindTheme();
+  }
+
+  function bindTooltip() {
+    const tip = $('tooltip');
+    const show = (el, x, y) => {
+      tip.textContent = el.getAttribute('data-tip');
+      tip.hidden = false;
+      const w = tip.offsetWidth, h = tip.offsetHeight;
+      const left = Math.min(window.innerWidth - w - 8, Math.max(8, x - w / 2));
+      const top = y - h - 12 < 8 ? y + 16 : y - h - 12;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    };
+    document.addEventListener('pointermove', (e) => {
+      const el = e.target.closest && e.target.closest('[data-tip]');
+      if (el) show(el, e.clientX, e.clientY); else tip.hidden = true;
+    });
+    document.addEventListener('focusin', (e) => {
+      const el = e.target.closest('[data-tip]');
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      show(el, r.left + r.width / 2, r.top);
+    });
+    document.addEventListener('focusout', () => { tip.hidden = true; });
+    window.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
+  }
+
+  function bindTheme() {
+    const order = ['auto', 'light', 'dark'];
+    const label = { auto: 'Auto', light: 'Claro', dark: 'Escuro' };
+    const read = () => { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; } };
+    const apply = (t) => {
+      if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', t);
+      $('themeLabel').textContent = label[t];
+      $('themeBtn').setAttribute('aria-label', 'Tema: ' + label[t] + '. Clique para trocar.');
+    };
+    apply(read());
+    $('themeBtn').addEventListener('click', () => {
+      const next = order[(order.indexOf(read()) + 1) % order.length];
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* segue sem salvar */ }
+      apply(next);
+    });
+  }
+
+  // ------------------------------------------------------------------ início
+
+  function start() {
+    $('demo').hidden = !source.demo;
+    bindEvents();
+    loadData();
+    setInterval(tick, TICK_MS);
+    setInterval(renderAll, RECOMPUTE_MS);
+    setInterval(checkVersion, VERSION_MS);
+  }
+
+  start();
+})();
