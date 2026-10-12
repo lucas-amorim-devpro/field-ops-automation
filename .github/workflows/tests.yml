@@ -1,0 +1,22 @@
+name: Testes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pester:
+    name: Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Pester 5+
+        shell: powershell
+        run: Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      # O runner não tem Excel: os testes com a tag "Excel" são pulados.
+      - name: Rodar testes
+        shell: powershell
+        run: .\tests\Invoke-Tests.ps1 -SkipExcel
