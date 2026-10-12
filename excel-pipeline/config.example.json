@@ -1,0 +1,16 @@
+{
+  "matriz": "matriz/slot-matriz.xlsm",
+  "csv": "../data-sample/orders-sample.csv",
+  "consulta": "tbOrdens",
+  "macro": "mdlSlot.CalcularIndicadores",
+  "agora": "2026-10-12T14:35",
+  "relatorio": "chegada-slot",
+  "appsScript": {
+    "url": "https://script.google.com/macros/s/COLE_AQUI_O_ID_DA_IMPLANTACAO/exec",
+    "token": "troque-por-um-token-longo-e-aleatorio",
+    "timeoutSegundos": 30,
+    "tentativas": 3
+  },
+  "pastaLogs": "logs",
+  "pastaSaida": "out"
+}
