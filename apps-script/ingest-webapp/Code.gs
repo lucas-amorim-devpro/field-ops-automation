@@ -21,7 +21,14 @@ var ABAS = {
   controle: 'Controle'
 };
 
-var CABECALHO_HISTORICO = ['data_referencia', 'agora', 'relatorio'].concat(COLUNAS_INDICADORES);
+/**
+ * Função (e não variável global) para não depender da ordem de carregamento dos .gs:
+ * o código fora de funções roda na ordem dos arquivos no editor, e Code.gs roda antes de
+ * Validacao.gs (onde COLUNAS_INDICADORES é definida) -> ReferenceError no Apps Script real.
+ */
+function cabecalhoHistorico_() {
+  return ['data_referencia', 'agora', 'relatorio'].concat(COLUNAS_INDICADORES);
+}
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
@@ -50,7 +57,8 @@ function doPost(e) {
 
 /** Upsert do dia na aba Historico + retrato atual na aba Indicadores. */
 function gravarIndicadores(planilha, payload) {
-  var historico = obterAba(planilha, ABAS.historico, CABECALHO_HISTORICO);
+  var cabecalho = cabecalhoHistorico_();
+  var historico = obterAba(planilha, ABAS.historico, cabecalho);
   removerLinhasDoDia(historico, payload.dataReferencia, payload.relatorio);
 
   var novas = montarLinhasHistorico(payload);
@@ -58,7 +66,7 @@ function gravarIndicadores(planilha, payload) {
   // Datas e chave como texto: senão o Sheets converte "2026-10-12" em data e "08:30" em hora,
   // exatamente como o Excel faz. Números continuam números (fórmulas e gráficos funcionam).
   historico.getRange(inicio, 1, novas.length, 5).setNumberFormat('@');
-  historico.getRange(inicio, 1, novas.length, CABECALHO_HISTORICO.length).setValues(novas);
+  historico.getRange(inicio, 1, novas.length, cabecalho.length).setValues(novas);
   historico.getRange(inicio, 10, novas.length, 1).setNumberFormat('0.00');
   historico.getRange(inicio, 12, novas.length, 2).setNumberFormat('0.00');
 

@@ -15,6 +15,16 @@ Describe 'Codificação dos scripts' {
 
         $withoutBom | Should -BeNullOrEmpty -Because 'rode tools\Convert-ToUtf8Bom.ps1'
     }
+
+    It 'nenhum arquivo de texto tem U+2028/U+2029 literal (o editor do Apps Script os remove e quebra o código)' {
+        $extensions = '.ps1', '.psm1', '.gs', '.js', '.html', '.css', '.json', '.md', '.pq', '.bas'
+        $withSeparators = Get-ChildItem $repoRoot -Recurse -File |
+            Where-Object { $extensions -contains $_.Extension -and $_.FullName -notmatch '\\(\.git|out|logs|para-claude-web)\\' } |
+            Where-Object { [IO.File]::ReadAllText($_.FullName) -match "[\u2028\u2029]" } |
+            ForEach-Object { $_.FullName.Substring($repoRoot.Length + 1) }
+
+        $withSeparators | Should -BeNullOrEmpty -Because 'escreva os escapes \u2028/\u2029 como texto'
+    }
 }
 
 Describe 'Log por etapa' {

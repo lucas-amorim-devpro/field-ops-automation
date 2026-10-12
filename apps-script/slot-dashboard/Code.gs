@@ -11,7 +11,10 @@
  * Depois, o navegador faz só a consulta leve de versão (obterVersao) a cada 90 s.
  *
  * Propriedades do script: PLANILHA_ID (planilha com as abas Base e Controle).
- * A planilha é aberta só para LEITURA.
+ * O código só LÊ a planilha. O escopo no manifesto é o completo (spreadsheets) porque
+ * SpreadsheetApp.openById não funciona com spreadsheets.readonly ("permissions are not sufficient").
+ * Acesso da implantação: ANYONE_ANONYMOUS ("Qualquer pessoa", sem login), necessário para o
+ * painel público e para incorporar no Google Sites. ("ANYONE" exige conta Google.)
  */
 
 var REGRAS = {
@@ -71,5 +74,5 @@ function json_(texto) {
 
 /** Torna o JSON seguro dentro de <script>: "</script>" no meio dos dados fecharia a tag. */
 function paraScript_(texto) {
-  return texto.replace(/</g, '\\u003c').replace(/ /g, '\\u2028').replace(/ /g, '\\u2029');
+  return texto.replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }

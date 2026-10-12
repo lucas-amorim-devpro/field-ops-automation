@@ -129,3 +129,17 @@ Escreva um RESUMO PARA O CLAUDE CODE em um bloco de código, com:
 - a URL pública do painel SOMENTE se eu disser que quero publicá-la no README.
 Eu vou colar esse resumo de volta no Claude Code para atualizar o repositório e o README.
 ```
+
+---
+
+## Resultado (12/10/2026)
+
+O teste real foi feito seguindo este prompt. Etapas 0 a 6 concluídas; a 7 (Google Sites) ficou
+para depois. A revisão e a implantação encontraram 4 problemas, já corrigidos no repositório:
+
+1. `ingest-webapp/Code.gs`: variável global dependia da ordem de carregamento dos `.gs` → virou função `cabecalhoHistorico_()`.
+2. `slot-dashboard/appsscript.json`: `"access": "ANYONE"` exigia login → `ANYONE_ANONYMOUS`.
+3. `slot-dashboard/appsscript.json`: `SpreadsheetApp.openById` não aceita `spreadsheets.readonly` → escopo `spreadsheets` (o código só lê).
+4. `slot-dashboard/Code.gs`: U+2028/U+2029 literais na regex → escapes como texto (e um teste que impede a volta).
+
+Tempos medidos e demais resultados: seção "Teste de ponta a ponta no Google" do README.

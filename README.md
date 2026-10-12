@@ -70,6 +70,28 @@ pedaços (o `CacheService` aceita até 100 KB por chave). Na massa fictícia des
 mesma técnica reduz o JSON de 454 KB para 47 KB, porque a hierarquia fictícia é fixa e cabe
 inteira no dicionário.
 
+### Teste de ponta a ponta no Google (demonstração)
+
+O fluxo completo deste repositório foi implantado numa conta Google pessoal, com uma planilha
+criada só para a demo, e testado de verdade:
+
+| Etapa | Resultado |
+|---|---|
+| `Send-OrdersBase.ps1` → `doPost` → aba Base | 1.683 ordens (37 duplicadas removidas), envio em ~10 s |
+| `Invoke-SlotPipeline.ps1` (Excel real) → `doPost` → Historico/Indicadores | 10 grupos, Excel × PowerShell idênticos, relatório completo em 24 s |
+| Token errado de propósito | recusado com `{"ok":false,"erro":"Token inválido."}` |
+| Painel no Apps Script (`doGet`), em janela anônima | mesmos números do PowerShell: **88,05% · Na meta · +7,38 p.p.** |
+| Atualização automática | com o painel aberto, um novo envio foi detectado na consulta de versão seguinte (≤ 90 s), sem recarregar a página |
+| 1ª abertura (cache frio) → 2ª e 3ª (cache em pedaços) | **~3,0 s → ~1,2 s e ~1,0 s** (JSON de 47 KB em 2 pedaços) |
+
+Os tempos acima são da **demo**. O "18 s → 2 s" da tabela de resultados é do painel real do
+trabalho, com outra massa de dados; os dois não devem ser comparados diretamente.
+
+> Num navegador com **várias contas Google logadas ao mesmo tempo**, Web Apps do Apps Script podem
+> mostrar "Não foi possível abrir o arquivo" (limitação conhecida do Google). Em janela anônima ou
+> com uma conta só, funciona. A faixa "Este aplicativo foi criado por um usuário do Google Apps
+> Script" é inserida pelo Google em contas pessoais e não pode ser removida.
+
 ## Arquitetura
 
 ```mermaid
@@ -178,11 +200,21 @@ E problemas que apareceram ao **reescrever este repositório**, todos pegos por 
 | "Excel fantasma": qualquer objeto COM ainda referenciado mantém o `EXCEL.EXE` vivo depois do `Quit` | Anotar o PID da instância criada pelo script, coletar o lixo duas vezes e, se preciso, encerrar só esse PID |
 | `$PSScriptRoot` chegou vazio no valor padrão de um parâmetro ao rodar com `powershell -File` | Calcular os caminhos padrão no corpo do script, não no bloco `param` |
 
+E os que só apareceram na **implantação real no Google Apps Script** (os testes locais não têm
+como pegar):
+
+| Problema | Solução |
+|---|---|
+| `ReferenceError: COLUNAS_INDICADORES is not defined`. No Apps Script, o código fora de funções roda na **ordem dos arquivos no editor**, e `Code.gs` rodava antes de `Validacao.gs` | Globais que dependem de outro arquivo viram funções (avaliação tardia): `cabecalhoHistorico_()` |
+| "Specified permissions are not sufficient to call `SpreadsheetApp.openById`" com o escopo `spreadsheets.readonly` | `openById` exige o escopo completo (`spreadsheets`), mesmo só lendo. O código do painel continua só lendo |
+| Painel público pedia login | `"access": "ANYONE"` significa *qualquer pessoa com conta Google*; para público sem login (e Google Sites) é `ANYONE_ANONYMOUS` |
+| O editor do Apps Script alertou "unusual line terminators": os escapes `\u2028`/`\u2029` de uma regex tinham virado caracteres invisíveis reais. Aceitar o alerta apagaria a regex | Escapes escritos como texto e um teste que falha se algum arquivo do repositório tiver U+2028/U+2029 literal |
+
 ## Testes
 
 | Suíte | Onde | Casos |
 |---|---|---|
-| Pester | [`tests/`](tests) | 92 (86 sem Excel; os outros 6 abrem o Excel real e montam/rodam a matriz) |
+| Pester | [`tests/`](tests) | 93 (87 sem Excel; os outros 6 abrem o Excel real e montam/rodam a matriz) |
 | Núcleo do painel (JS) | [`dashboard-pages/tests.html`](https://lucas-amorim-devpro.github.io/field-ops-automation/tests.html) | 34 (mesmos casos do Pester) |
 | Funções puras do Apps Script | [`apps-script/tests/tests.html`](apps-script/tests/tests.html) | 36, incluindo a ida e volta planilha → JSON compactado → painel |
 
@@ -205,15 +237,17 @@ estrutura, código, testes e documentação. As decisões e regras de negócio v
 na operação, e todo o código foi revisado e **executado** antes de entrar: os testes rodaram no meu
 PC, contra o Excel real, e o painel foi conferido no navegador, no tamanho de celular e nos dois
 temas. Vários itens da tabela de aprendizados acima foram bugs que os testes pegaram durante a
-geração. A implantação do Apps Script, que depende da minha conta Google, foi guiada por um prompt
-documentado em [`docs/`](docs/prompt-claude-web-apps-script.md).
+geração. A implantação do Apps Script, que depende da minha conta Google, foi feita com o Claude
+na web, guiada por um prompt documentado em [`docs/`](docs/prompt-claude-web-apps-script.md): a
+revisão e o teste real acharam 4 problemas que só existem no Apps Script (tabela acima), corrigidos
+aqui depois.
 
 ## Segurança e anonimização
 
 - Nada aqui saiu do ambiente de trabalho: código reescrito, dados gerados por script.
 - O `config.json` (URL e token) está no `.gitignore`. Os arquivos gravados em `-DryRun` trazem o token como `***`.
 - O token vai no corpo do JSON (o `doPost` não lê cabeçalhos) e é comparado em tempo constante; fica nas Propriedades do script, nunca no código.
-- O painel no Apps Script lê a planilha com escopo **somente leitura**.
+- O painel no Apps Script **só lê** a planilha (o escopo no manifesto é o completo porque `SpreadsheetApp.openById` não aceita o de somente leitura).
 
 ---
 
@@ -231,13 +265,15 @@ automation I built for a fiber installation and repair field operation (3 region
 - **Showcase:** [live demo dashboard](https://lucas-amorim-devpro.github.io/field-ops-automation/),
   a dependency-free HTML/CSS/JS page (dark/light, mobile-friendly, live countdowns, hierarchy drill-down).
 - **Quality:** the KPI rule is implemented in VBA, PowerShell and JavaScript, and all three are
-  tested against the same cases (92 Pester, 34 JS and 36 Apps Script tests). The pipeline refuses
+  tested against the same cases (93 Pester, 34 JS and 36 Apps Script tests). The pipeline refuses
   to send data if Excel and PowerShell disagree.
 - **Lessons learned** cover Excel COM typing (`InvokeMember`), locale-independent date parsing,
   clipboard-free VBA, ghost `EXCEL.EXE` processes, UTF-8 BOM in PowerShell 5.1, background-tab
   timers, and matching Google Sheets rounding.
+- **End-to-end tested on Google:** PowerShell → Apps Script → Sheets → live dashboard, same numbers
+  everywhere; demo dashboard opens in ~3 s cold and ~1 s with the chunked cache.
 - **Built with AI:** written with Claude Code to move faster; every change was reviewed and run
-  against real Excel and a browser.
+  against real Excel, a browser and a real Apps Script deployment.
 
 ## Licença
 
