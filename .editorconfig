@@ -1,0 +1,16 @@
+root = true
+
+[*]
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+charset = utf-8
+
+# PowerShell 5.1 lê arquivos sem BOM como ANSI e quebra os acentos.
+[*.{ps1,psm1,psd1}]
+charset = utf-8-bom
+
+[*.{js,css,html,json,gs,md,yml}]
+indent_size = 2
+end_of_line = lf

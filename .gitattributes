@@ -1,0 +1,11 @@
+# Normaliza finais de linha no repositório; scripts Windows ficam com CRLF no checkout.
+* text=auto
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.bas  text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.xlsm binary

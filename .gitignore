@@ -1,0 +1,34 @@
+# --- Segredos e configuração local (NUNCA versionar) ---
+config.json
+**/config.json
+.env
+.clasp.json
+*.secret.*
+
+# --- Saídas geradas em tempo de execução ---
+logs/
+*.log
+output/
+excel-pipeline/out/
+tests/out/
+
+# --- Arquivos temporários do Office ---
+~$*
+*.tmp
+
+# --- Editores e sistema ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Configuração local do Claude Code ---
+.claude/
+
+# --- Matriz gerada por excel-pipeline\Build-DemoWorkbook.ps1 (binário com macro) ---
+excel-pipeline/matriz/
+apps-script/tests/out/
+
+# --- Pacote temporário para colar no Claude web ---
+para-claude-web/
