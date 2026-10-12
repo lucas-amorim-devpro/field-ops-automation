@@ -136,11 +136,17 @@ function responder(obj) {
 // Utilitários para rodar à mão no editor (menu Executar)
 // ---------------------------------------------------------------------------
 
-/** Gera um token aleatório, salva em INGEST_TOKEN e mostra no log (copie para o config.json). */
+/**
+ * Gera um token aleatório e salva em INGEST_TOKEN. O token NÃO é impresso no log: o registro
+ * de execuções fica guardado no projeto. Para copiá-lo para o config.json, abra
+ * Configurações do projeto > Propriedades do script. O token antigo deixa de valer na hora
+ * (o doPost lê INGEST_TOKEN a cada chamada; não precisa reimplantar).
+ */
 function gerarToken() {
   var token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
   PropertiesService.getScriptProperties().setProperty('INGEST_TOKEN', token);
-  console.log('Token salvo em Propriedades do script. Copie para o config.json: ' + token);
+  console.log('Token novo salvo em Propriedades do script (INGEST_TOKEN). ' +
+    'Copie em Configurações do projeto > Propriedades do script para o config.json.');
 }
 
 /** Simula um envio sem sair do editor, para testar permissões e gravação. */

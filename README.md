@@ -49,7 +49,8 @@ Uma biblioteca de scripts **PowerShell** que, para cada relatório:
 3. roda a **macro VBA** que calcula os indicadores (sem área de transferência);
 4. lê o resultado de uma vez (`Value2`) e **confere** com um cálculo independente;
 5. envia os valores em JSON para um **Web App do Google Apps Script** (`doPost` com token);
-6. entrega por **4 canais**: painel web, Google Sheets, rascunhos no Gmail e prints no WhatsApp.
+6. entrega por **4 canais**: painel web (no trabalho, publicado no Google Sites), Google Sheets,
+   rascunhos no Gmail e prints no WhatsApp.
 
 Cada etapa é registrada em log com duração e erro, o Excel é sempre encerrado (mesmo quando algo
 falha) e o mesmo script roda no PC de qualquer pessoa da equipe.
@@ -167,8 +168,15 @@ O `Build-DemoWorkbook.ps1` importa o módulo VBA por script e, para isso, precis
 Configurações de Macro). Não é preciso "Habilitar todas as macros".
 
 Para enviar de verdade, copie `excel-pipeline/config.example.json` para `config.json` (que está no
-`.gitignore`) e preencha a URL `/exec` e o token do Web App. O passo a passo de implantação do Apps
-Script está em [`docs/prompt-claude-web-apps-script.md`](docs/prompt-claude-web-apps-script.md).
+`.gitignore`) e preencha:
+
+- **url:** no projeto `ingest-webapp`, *Implantar > Gerenciar implantações > URL do app da Web* (termina em `/exec`);
+- **token:** rode `gerarToken()` no editor e copie o valor de `INGEST_TOKEN` em *Configurações do
+  projeto > Propriedades do script*. O token não é impresso no log de execução. Para trocá-lo,
+  basta rodar `gerarToken()` de novo: o anterior deixa de valer na hora, sem reimplantar.
+
+O passo a passo de implantação do Apps Script está em
+[`docs/prompt-claude-web-apps-script.md`](docs/prompt-claude-web-apps-script.md).
 
 ## Aprendizados
 
@@ -207,7 +215,7 @@ como pegar):
 |---|---|
 | `ReferenceError: COLUNAS_INDICADORES is not defined`. No Apps Script, o código fora de funções roda na **ordem dos arquivos no editor**, e `Code.gs` rodava antes de `Validacao.gs` | Globais que dependem de outro arquivo viram funções (avaliação tardia): `cabecalhoHistorico_()` |
 | "Specified permissions are not sufficient to call `SpreadsheetApp.openById`" com o escopo `spreadsheets.readonly` | `openById` exige o escopo completo (`spreadsheets`), mesmo só lendo. O código do painel continua só lendo |
-| Painel público pedia login | `"access": "ANYONE"` significa *qualquer pessoa com conta Google*; para público sem login (e Google Sites) é `ANYONE_ANONYMOUS` |
+| Painel público pedia login | `"access": "ANYONE"` significa *qualquer pessoa com conta Google*; para público sem login é `ANYONE_ANONYMOUS` |
 | O editor do Apps Script alertou "unusual line terminators": os escapes `\u2028`/`\u2029` de uma regex tinham virado caracteres invisíveis reais. Aceitar o alerta apagaria a regex | Escapes escritos como texto e um teste que falha se algum arquivo do repositório tiver U+2028/U+2029 literal |
 
 ## Testes

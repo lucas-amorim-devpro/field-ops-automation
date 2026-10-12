@@ -143,3 +143,8 @@ para depois. A revisão e a implantação encontraram 4 problemas, já corrigido
 4. `slot-dashboard/Code.gs`: U+2028/U+2029 literais na regex → escapes como texto (e um teste que impede a volta).
 
 Tempos medidos e demais resultados: seção "Teste de ponta a ponta no Google" do README.
+
+Atualização: o token do `ingest-webapp` foi trocado depois do teste (o antigo passou por um chat).
+`gerarToken()` deixou de imprimir o token no log de execução; o valor é copiado em
+Configurações do projeto > Propriedades do script. A etapa 7 (Google Sites) foi pulada: a demo
+pública é a do GitHub Pages, e o Google Sites é só onde o painel original do trabalho é publicado.
