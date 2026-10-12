@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Testes do Apps Script</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, "Segoe UI", sans-serif; margin: 24px auto; max-width: 900px; padding: 0 16px; background: Canvas; color: CanvasText; }
+    .ok { color: #0a7d0a; } .fail { color: #c62828; font-weight: 600; }
+    li { font-family: Consolas, monospace; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Testes das funções puras do Apps Script</h1>
+  <p>Rode a partir da raiz do repositório:
+    <code>.\tools\Start-DashboardServer.ps1 -Root . -Port 8081</code> e abra
+    <code>http://localhost:8081/apps-script/tests/tests.html</code>.</p>
+  <p id="summary">Rodando…</p>
+  <ul id="out"></ul>
+
+  <!-- Arquivos .gs são JavaScript: carregados direto, sem cópia. -->
+  <script src="../ingest-webapp/Validacao.gs"></script>
+  <script src="../slot-dashboard/Compactacao.gs"></script>
+  <script src="../slot-dashboard/CacheEmPedacos.gs"></script>
+  <script src="../../dashboard-pages/js/core.js"></script>
+  <script>
+  (async function () {
+    var results = [];
+    function eq(name, actual, expected) {
+      var pass = JSON.stringify(actual) === JSON.stringify(expected);
+      results.push({ name: name, pass: pass, detail: pass ? '' : ' → obtido ' + JSON.stringify(actual) + ', esperado ' + JSON.stringify(expected) });
+    }
+
+    // ---------------- Validacao.gs ----------------
+    var TOKEN = 'abc123-token-de-teste';
+    function payloadOk() {
+      return {
+        token: TOKEN, relatorio: 'chegada-slot', dataReferencia: '2026-10-12', agora: '2026-10-12T14:35',
+        colunas: COLUNAS_INDICADORES.slice(),
+        linhas: [['Total', 'Total', 159, 140, 19, 64, 88.05, 'Na meta', 80.67, 7.38],
+                 ['Slot', '16:00', 0, 0, 0, 29, null, 'Sem dados', 86.84, null]]
+      };
+    }
+    eq('tokenIgual: igual', tokenIgual(TOKEN, TOKEN), true);
+    eq('tokenIgual: diferente', tokenIgual('abc123-token-de-tesTE', TOKEN), false);
+    eq('tokenIgual: prefixo', tokenIgual('abc', TOKEN), false);
+    eq('tokenIgual: token esperado vazio nunca aceita', tokenIgual('', ''), false);
+    eq('payload válido', validarPayload(payloadOk(), TOKEN).ok, true);
+
+    var p;
+    p = payloadOk(); p.token = 'errado';            eq('recusa token errado', validarPayload(p, TOKEN).erro, 'Token inválido.');
+    p = payloadOk(); p.relatorio = 'outro';         eq('recusa relatório desconhecido', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.dataReferencia = '2026-02-30'; eq('recusa data impossível', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.colunas.reverse();           eq('recusa colunas trocadas', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.linhas[0][6] = 120;          eq('recusa percentual > 100', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.linhas[0][7] = 'Ótimo';      eq('recusa selo desconhecido', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.linhas[0][2] = 1.5;          eq('recusa contagem não inteira', validarPayload(p, TOKEN).ok, false);
+    p = payloadOk(); p.linhas = [];                 eq('recusa lista vazia', validarPayload(p, TOKEN).ok, false);
+    eq('recusa corpo nulo', validarPayload(null, TOKEN).ok, false);
+    eq('histórico: prefixa data/agora/relatório e troca null por vazio',
+      montarLinhasHistorico(payloadOk())[1],
+      ['2026-10-12', '2026-10-12T14:35', 'chegada-slot', 'Slot', '16:00', 0, 0, 0, 29, '', 'Sem dados', 86.84, '']);
+
+    // ---------------- CacheEmPedacos.gs ----------------
+    function cacheFalso() {
+      var store = {};
+      return {
+        store: store,
+        get: function (k) { return k in store ? store[k] : null; },
+        getAll: function (ks) { var o = {}; ks.forEach(function (k) { if (k in store) o[k] = store[k]; }); return o; },
+        putAll: function (vals) { Object.keys(vals).forEach(function (k) { store[k] = vals[k]; }); }
+      };
+    }
+    var texto = 'x'.repeat(100001) + 'ção';
+    var cache = cacheFalso();
+    eq('divide em pedaços de 45 mil', gravarCacheEmPedacos(cache, 'dados', 'v1', texto), 3);
+    eq('nenhum pedaço passa de 45 mil caracteres', Object.keys(cache.store).filter(function (k) { return k !== 'dados_meta'; })
+      .every(function (k) { return cache.store[k].length <= 45000; }), true);
+    eq('remonta o texto idêntico', lerCacheEmPedacos(cache, 'dados', 'v1') === texto, true);
+    eq('versão diferente -> sem cache', lerCacheEmPedacos(cache, 'dados', 'v2'), null);
+    delete cache.store.dados_1;
+    eq('pedaço expulso -> sem cache (não devolve texto pela metade)', lerCacheEmPedacos(cache, 'dados', 'v1'), null);
+    eq('cache vazio -> null', lerCacheEmPedacos(cacheFalso(), 'dados', 'v1'), null);
+
+    // ---------------- Compactacao.gs ----------------
+    eq('data dd/MM/yyyy', normalizarData('12/10/2026'), '2026-10-12');
+    eq('data d/M/yy', normalizarData('2/9/26'), '2026-09-02');
+    eq('data ISO', normalizarData('2026-10-12'), '2026-10-12');
+    eq('data inválida', normalizarData('ontem'), null);
+    eq('hora 8:05', normalizarHora('8:05'), 485);
+    eq('hora 08:05:00', normalizarHora('08:05:00'), 485);
+    eq('hora vazia', normalizarHora(''), null);
+    eq('hora 25:00', normalizarHora('25:00'), null);
+
+    // Ida e volta: JSON do painel -> tabela como a aba Base (texto) -> compactarOrdens -> core.js.
+    var original = await fetch('../../dashboard-pages/data/slot-data.json').then(function (r) { return r.json(); });
+    var decod = SlotCore.decode(original);
+    var hojeIso = original.agora.slice(0, 10);
+    var tabela = [COLUNAS_BASE.slice()].concat(decod.orders.map(function (o) {
+      var d = original.dic.datas[o.day].split('-');
+      return [o.id, d[2] + '/' + d[1] + '/' + d[0], o.regional, o.cidade, o.gerente, o.coordenacao, o.supervisao,
+              o.tecnico, o.tipo, o.slot, o.chegadaMin === null ? '' : SlotCore.minutesToText(o.chegadaMin), o.status];
+    }));
+    var compacto = compactarOrdens(tabela, { versao: 'teste', agora: original.agora, regras: original.regras });
+    var recod = SlotCore.decode(compacto);
+    var agoraMs = SlotCore.parseLocal(original.agora).getTime();
+    var hojeA = decod.orders.filter(function (o) { return o.day === decod.days.length - 1; });
+    var hojeB = recod.orders.filter(function (o) { return o.day === recod.days.length - 1; });
+    eq('ida e volta: mesma quantidade de ordens', recod.orders.length, decod.orders.length);
+    eq('ida e volta: mesmo "hoje"', recod.days[recod.days.length - 1], hojeIso);
+    eq('ida e volta: mesmo % geral de hoje (88,05)',
+      SlotCore.summarize(hojeB, agoraMs, recod.rules).percentual, SlotCore.summarize(hojeA, agoraMs, decod.rules).percentual);
+    eq('ida e volta: % geral = 88.05', SlotCore.summarize(hojeB, agoraMs, recod.rules).percentual, 88.05);
+    eq('ida e volta: tamanho parecido com o do PowerShell (±5%)',
+      Math.abs(JSON.stringify(compacto).length / JSON.stringify(original).length - 1) < 0.05, true);
+    eq('filtra dias fora da janela de 7 dias', compactarOrdens(
+      [COLUNAS_BASE, ['OS-1', '01/01/2020', 'A', 'X', 'G', 'C', 'S', 'T', 'Reparo', '08:30', '', 'Agendada']],
+      { versao: 'v', agora: '2026-10-12T14:35', regras: original.regras }).linhas.length, 0);
+    var faltando = null;
+    try { compactarOrdens([['id_os', 'data']], { versao: 'v', agora: '2026-10-12T14:35', regras: {} }); } catch (e) { faltando = e.message; }
+    eq('erro claro quando falta coluna', faltando, 'Coluna ausente na aba Base: regional');
+
+    // ---------------- relatório ----------------
+    var failed = results.filter(function (r) { return !r.pass; }).length;
+    var out = document.getElementById('out');
+    results.forEach(function (r) {
+      var li = document.createElement('li');
+      li.className = r.pass ? 'ok' : 'fail';
+      li.textContent = (r.pass ? '✔ ' : '✘ ') + r.name + r.detail;
+      out.appendChild(li);
+    });
+    var s = document.getElementById('summary');
+    s.className = failed ? 'fail' : 'ok';
+    s.textContent = (results.length - failed) + ' de ' + results.length + ' passaram' + (failed ? ' — ' + failed + ' falharam' : '');
+    window.TEST_RESULT = { total: results.length, failed: failed, falhas: results.filter(function (r) { return !r.pass; }) };
+  })();
+  </script>
+</body>
+</html>
